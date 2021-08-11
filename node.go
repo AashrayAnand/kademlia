@@ -44,11 +44,7 @@ func NewNode() *Node {
 		Port: randomPort(),
 	}
 
-	if ip, err := LookupLocalIP(); err == nil {
-		node.Addr = ip
-	} else {
-		node.Addr = net.ParseIP("127.0.0.1")
-	}
+	node.Addr = net.ParseIP("127.0.0.1")
 
 	// Generate random id.
 	rand.Read(node.Id)

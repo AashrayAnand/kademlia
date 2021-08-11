@@ -45,6 +45,13 @@ func GenerateMsgId() []byte {
 }
 
 // Helper to write to log if logging flag is enabled
+func writeErr(msg string, args ...interface{}) {
+	if configs.LoggingEnabled {
+		log.Fatalf(msg, args...)
+	}
+}
+
+// Helper to write to log if logging flag is enabled
 func writeLog(msg string, args ...interface{}) {
 	if configs.LoggingEnabled {
 		log.Printf(msg, args...)

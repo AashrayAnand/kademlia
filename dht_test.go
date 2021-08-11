@@ -5,8 +5,7 @@ import (
 )
 
 func TestAddNodesUpToMaxInBucket(t *testing.T) {
-	table1 := new(Dht)
-	table1.init()
+	table1 := NewDht()
 	table1.Node.dummyId()
 
 	for i := 0; i < maxNodesInBucket; i++ {
@@ -31,8 +30,7 @@ func TestAddNodesUpToMaxInBucket(t *testing.T) {
 }
 
 func TestAddNodesToKBucketBasic(t *testing.T) {
-	table1 := new(Dht)
-	table1.init()
+	table1 := NewDht()
 	table1.Node.dummyId()
 
 	node1 := NewNode()
@@ -54,8 +52,7 @@ func TestAddNodesToKBucketBasic(t *testing.T) {
 // Test the result of getting the highest allowable index
 // for varying different node IDs.
 func TestGetHighestAllowableBucketIndex(t *testing.T) {
-	table := new(Dht)
-	table.init()
+	table := NewDht()
 
 	thisId := table.Node.Id
 

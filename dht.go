@@ -1,12 +1,11 @@
 package main
 
 import (
+	"encoding/gob"
 	"flag"
 	"fmt"
-	"log"
+	"io"
 	"net"
-	"net/http"
-	"net/rpc"
 	"sync"
 )
 
@@ -17,15 +16,17 @@ import (
 // across nodes, to provide a distributed hash table
 // via the Kademlia protocol.
 type Dht struct {
-	mtx            sync.Mutex
-	Data           *kvstore
-	Node           *Node
-	Buckets        [][]*Node
-	LoggingEnabled bool
+	mtx        sync.Mutex
+	ConnClosed chan struct{}
+	Done       chan struct{}
+	Data       *kvstore
+	Node       *Node
+	Buckets    [][]*Node
+	Listener   net.Listener
 }
 
-func (d *Dht) formPingMsg(pong bool) *Ping {
-	return &Ping{
+func (d *Dht) formPingMsg(pong bool) *Message {
+	return &Message{
 		Type:   PingMsg,
 		MsgId:  GenerateMsgId(),
 		Sender: d.Node,
@@ -33,8 +34,8 @@ func (d *Dht) formPingMsg(pong bool) *Ping {
 	}
 }
 
-func (k *Dht) formFindKeyMsg(key string) *FindValue {
-	return &FindValue{
+func (k *Dht) formFindKeyMsg(key string) *Message {
+	return &Message{
 		Type:   FindValueMsg,
 		MsgId:  GenerateMsgId(),
 		Sender: k.Node,
@@ -42,8 +43,8 @@ func (k *Dht) formFindKeyMsg(key string) *FindValue {
 	}
 }
 
-func (k *Dht) formStoreMsg(value string) *Store {
-	return &Store{
+func (k *Dht) formStoreMsg(value string) *Message {
+	return &Message{
 		Type:   StoreMsg,
 		MsgId:  GenerateMsgId(),
 		Sender: k.Node,
@@ -122,47 +123,56 @@ func (d *Dht) addToKBucket(other *Node) {
 	}
 }
 
-// FindValue RPC
-func (d *Dht) FindValue(ReqMsg *FindValue, Resp *FindValueResult) error {
-	writeLog("Serving find RPC with ID %v\n", ReqMsg.MsgId)
-	Resp = &FindValueResult{
+func (d *Dht) FindValue(ReqMsg *Message) error {
+	writeLog("Serving find value with ID %v\n", ReqMsg.MsgId)
+	_ = &Message{
 		Type:   FindValueMsg,
 		MsgId:  ReqMsg.MsgId,
 		Sender: d.Node,
 		Value:  nil,
 	}
 
-	// Get value from kvstore if cached locally, otherwise
-	// initiate process of finding value via DHT
-	if v, err := d.Data.Get(ReqMsg.Key); err != nil {
-		Resp.Value = v
-	} else {
-		return err
+	return nil
+}
+
+func (d *Dht) FindNode(ReqMsg *Message) error {
+	writeLog("Serving find node with ID %v\n", ReqMsg.MsgId)
+	_ = &Message{
+		Type:   FindValueMsg,
+		MsgId:  ReqMsg.MsgId,
+		Sender: d.Node,
+		Value:  nil,
 	}
 
 	return nil
 }
 
-// Ping RPC
-func (d *Dht) Ping(ReqMsg *Ping, Resp *Ping) error {
-	writeLog("Serving ping RPC with ID %v\n", ReqMsg.MsgId)
-	Resp = &Ping{
-		Type:   PingMsg,
-		MsgId:  ReqMsg.MsgId,
-		Sender: d.Node,
-		Pong:   true}
+func (d *Dht) Ping(ReqMsg *Message) error {
+	writeLog("Serving ping with ID %v\n", ReqMsg.MsgId)
 
 	d.addToKBucket(ReqMsg.Sender)
+
+	if !ReqMsg.Pong {
+		// This is ping from another node, so we need to send pong
+		resp := &Message{
+			Type:   PingMsg,
+			MsgId:  ReqMsg.MsgId,
+			Sender: d.Node,
+			Pong:   true}
+		d.sendMessageHost(resp, ReqMsg.Sender.Addr, ReqMsg.Sender.Port)
+	} else {
+		// This is response to our ping
+		writeLog("Pong from %v\n", ReqMsg.Sender.Id)
+	}
 
 	return nil
 }
 
-// Store RPC
-func (d *Dht) Store(ReqMsg *Store, resp *StoreResp) error {
-	writeLog("Serving store RPC with ID %v\n", ReqMsg.MsgId)
+func (d *Dht) Store(ReqMsg *Message) error {
+	writeLog("Serving store with ID %v\n", ReqMsg.MsgId)
 	d.Data.Set(ReqMsg.Key, ReqMsg.Data, ReqMsg.ExpirationTime, ReqMsg.ReplicationInterval)
 
-	resp = &StoreResp{
+	_ = &Message{
 		Type:          StoreMsg,
 		MsgId:         ReqMsg.MsgId,
 		Sender:        d.Node,
@@ -178,39 +188,113 @@ func (d *Dht) getKNearestNodes(key []byte) []*Node {
 	return nil
 }
 
-// Join a Kademlia network, by pinging an existing node, and further
-// acquiring a list of nodes in the network to seed the k buckets
-func (d *Dht) join(IP net.IP, Port int) error {
-	client, err := rpc.DialHTTP("tcp", fmt.Sprintf("%s:%s", IP.String(), fmt.Sprint(Port)))
+// Sends message to host specified by IP/port
+func (d *Dht) sendMessageHost(resp *Message, IP net.IP, port int) error {
+	return d.sendMessage(resp, fmt.Sprintf("%s:%s", IP.String(), fmt.Sprint(port)))
+}
 
+// Sends message to node receiver
+func (d *Dht) sendMessage(msg *Message, addr string) error {
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
+		writeLog("Error sending back response to message: %d, error: %v\n", msg.MsgId, err)
 		return err
 	}
 
-	pingResp := new(Ping)
-	err = client.Call("Dht.Ping", d.formPingMsg(false), pingResp)
-
+	encoder := gob.NewEncoder(conn)
+	err = encoder.Encode(*msg)
 	if err != nil {
+		writeLog("Error encoding response to message: %d, error: %v\n", msg.MsgId, err)
 		return err
 	}
 
-	writeLog("Received ping response on join %v", pingResp)
-
-	d.addToKBucket(pingResp.Sender)
-
-	// TODO: seed buckets with more nodes
-
+	conn.Close()
 	return nil
 }
 
-func (d *Dht) init() {
-	d.Data = NewKVStore()
-	d.Node = NewNode()
-	d.Buckets = make([][]*Node, numBuckets)
+// Join a Kademlia network, by pinging an existing node, and further
+// acquiring a list of nodes in the network to seed the k buckets
+func (d *Dht) join(IP net.IP, Port int) error {
+	writeLog("Joining the kademlia network with buddy node %s:%d", IP, Port)
+	pingMsg := &Message{
+		Type:   PingMsg,
+		MsgId:  GenerateMsgId(),
+		Sender: d.Node,
+		Pong:   false,
+	}
+	return d.sendMessageHost(pingMsg, IP, Port)
+}
+
+func (d *Dht) handleConn(conn net.Conn) {
+	writeLog("handling connection %v", conn)
+	defer func() {
+		writeLog("Closing connection")
+		conn.Close()
+		d.ConnClosed <- struct{}{}
+	}()
+
+	// Decode the client message to well-defined message type
+	decoder := gob.NewDecoder(conn)
+	msg := Message{}
+	err := decoder.Decode(&msg)
+	if err != nil && err != io.EOF {
+		writeLog("Error decoding message %s", err)
+		return
+	}
+
+	// Route message to appropriate handler
+	switch msg.Type {
+	case PingMsg:
+		d.Ping(&msg)
+	case FindValueMsg:
+		d.FindValue(&msg)
+	case StoreMsg:
+		d.Store(&msg)
+	case FindNodeMsg:
+		d.FindNode(&msg)
+	default:
+		writeErr("Unrecognized message type %d", msg.Type)
+	}
+}
+
+func (d *Dht) entry() {
+	for {
+		conn, err := d.Listener.Accept()
+		if err != nil {
+			writeLog("Closing server connection %s", err)
+			return
+		}
+
+		go d.handleConn(conn)
+	}
+}
+
+func (d *Dht) initListener() {
+	var err error
+	d.Listener, err = net.Listen("tcp", fmt.Sprintf(":%d", d.Node.Port))
+	if err != nil {
+		writeLog("Error listening on port %d\n", d.Node.Port)
+	}
+}
+
+func NewDht() *Dht {
+	dht := &Dht{
+		Done:       make(chan struct{}),
+		ConnClosed: make(chan struct{}),
+		Data:       NewKVStore(),
+		Node:       NewNode(),
+		Buckets:    make([][]*Node, numBuckets),
+	}
+
+	// Set up listener and proceed to entry, which is
+	// serial loop waiting for connections, and dispatching
+	// each to goroutine
+	dht.initListener()
+
+	return dht
 }
 
 func main() {
-
 	// These flags are used for a server to be added to an existing kademlia
 	// network. If they are provided, an initial ping will be sent to the
 	// specified server, which will seed this new server with node information
@@ -220,33 +304,36 @@ func main() {
 	flag.Parse()
 
 	configs.LoggingEnabled = *loggingEnabled
-	dht := new(Dht)
-	dht.init()
-	rpc.Register(&dht)
-	rpc.HandleHTTP()
+	dht := NewDht()
 
-	l, err := net.Listen("tcp", fmt.Sprintf(":%s", fmt.Sprint(randomPort())))
-	if err != nil {
-		log.Fatal("dialing:", err)
-	}
-	rpc.Accept(l)
+	go func() {
+		defer func() {
+			writeLog("Closing server. Goodbye")
+			dht.Done <- struct{}{}
+		}()
+
+		dht.entry()
+	}()
+
+	writeLog("DHT server started at %s\n", dht.Listener.Addr().String())
 
 	if *joinIP != "" && *joinPort != -1 {
 		err := dht.join(net.ParseIP(*joinIP), *joinPort)
 
 		if err != nil {
-			log.Fatal("Fatal error attempting to join network ", err)
+			writeLog("Fatal error attempting to join network %s", err)
 		}
 	}
 
-	// key clean up thread
+	// TODO key clean up thread
 
-	// key republish-replicate thread
+	// TODO key republish-replicate thread
 
 	// rpc receive queue thread
 
 	// rpc send queue thread
 
-	fmt.Printf("Starting up svr at %s\n", l.Addr().String())
-	http.Serve(l, nil)
+	// Wait on done channel. This channel is signalled
+	// only by user input to bring down the server
+	<-dht.Done
 }
