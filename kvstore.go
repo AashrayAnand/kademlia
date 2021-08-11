@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha1"
 	"errors"
 	"fmt"
 	"sync"
@@ -21,12 +20,12 @@ type Value struct {
 type kvstore struct {
 	mtx sync.RWMutex
 	// The hash table of key/value pairs.
-	table map[string]Value
+	table map[string]*Value
 }
 
 // Instantiate key-value store
 func NewKVStore() *kvstore {
-	k := &kvstore{table: make(map[string]Value), mtx: sync.RWMutex{}}
+	k := &kvstore{table: make(map[string]*Value), mtx: sync.RWMutex{}}
 	return k
 }
 
@@ -57,20 +56,14 @@ func (k *kvstore) GetKeysForReplicaion() [][]byte {
 	return keys
 }
 
-// gets sha checksum for a data byte slice, resuts is a 160-bit key
-func (k *kvstore) Hash(data []byte) []byte {
-	hash := sha1.Sum(data)
-	return hash[:]
-}
-
 // Get the value for the given key, if found
-func (k *kvstore) Get(key []byte) (value string, error error) {
+func (k *kvstore) Get(key []byte) (value []byte, error error) {
 	k.mtx.RLock()
 	defer k.mtx.RUnlock()
 	if v, ok := k.table[string(key)]; ok {
-		return string(v.Value), nil
+		return v.Value, nil
 	}
-	return "", errors.New(fmt.Sprintf("Key %s not found", key))
+	return nil, errors.New(fmt.Sprintf("Key %s not found", key))
 }
 
 // Set the value for the given key. We enforce a timeout on the
@@ -80,7 +73,7 @@ func (k *kvstore) Get(key []byte) (value string, error error) {
 func (k *kvstore) Set(key []byte, value []byte, expirationTime time.Time, replicationInterval time.Duration) {
 	k.mtx.Lock()
 	defer k.mtx.Unlock()
-	k.table[string(key)] = Value{Value: value, ExpirationTime: expirationTime, LastTimeReplicated: time.Now(), ReplicationInterval: replicationInterval}
+	k.table[string(key)] = &Value{Value: value, ExpirationTime: expirationTime, LastTimeReplicated: time.Now(), ReplicationInterval: replicationInterval}
 }
 
 // Delete the value for the given key, if found.

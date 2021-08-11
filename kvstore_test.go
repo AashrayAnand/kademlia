@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ func TestHashSetAndGet(t *testing.T) {
 	rand.Read(data)
 
 	// Hash data to get key
-	key := kvstore.Hash(data)
+	key := Hash(data)
 	kvstore.Set(key, data, time.Now().Add(time.Minute), time.Hour)
 
 	value, err := kvstore.Get(key)
@@ -23,7 +24,7 @@ func TestHashSetAndGet(t *testing.T) {
 		t.Error("Error getting value:", err)
 	}
 
-	if value != string(data) {
+	if !bytes.Equal(value, data) {
 		t.Error("Error getting value:", value)
 	}
 }

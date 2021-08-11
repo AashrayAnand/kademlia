@@ -33,6 +33,18 @@ type Store struct {
 	ExpirationTime      time.Time
 }
 
+// Response to a Store message. Includes the
+// key/value pair that was stored, where the key
+// was derived from the data originally passed by the caller
+type StoreResp struct {
+	Key           []byte
+	Type          MessageType
+	MsgId         []byte
+	Sender        *Node
+	Value         []byte
+	KNearestNodes []*Node
+}
+
 // Recipient of this message returns up to K
 // nodes that are closest to the specified target
 // node by the sender
@@ -51,4 +63,13 @@ type FindValue struct {
 	MsgId  []byte
 	Sender *Node
 	Key    []byte
+}
+
+// Result of FindValue RPC is the corresponding
+// value for the given key, if it has it stored, otherwise nil
+type FindValueResult struct {
+	Type   MessageType
+	MsgId  []byte
+	Sender *Node
+	Value  []byte
 }
